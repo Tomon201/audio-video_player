@@ -1,0 +1,52 @@
+name: api_test
+description: "A new Flutter project."
+# The following line prevents the package from being accidentally published to
+# pub.dev using `flutter pub publish`. This is preferred for private packages.
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+# of the product and file versions while build-number is used as the build suffix.
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.7
+
+# versions available, run `flutter pub outdated`.
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Воспроизведение аудио и фоновый режим
+  just_audio: ^0.9.36
+  just_audio_background: ^0.0.1-beta.11
+
+  # Воспроизведение видеозаписей (.mp4)
+  video_player: ^2.8.2
+
+  # Запрос разрешений к памяти
+  permission_handler: ^11.3.1
+
+  # Локальное хранение
+  shared_preferences: ^2.2.2
+
+  # Работа с путями к файлам
+  path_provider: ^2.1.2
+
+  # Иконки
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # rules and activating additional ones.
+  flutter_lints: ^6.0.0
+
+# The following section is specific to Flutter packages.
+flutter:
+
+  # The following line ensures that the Material Icons font is
+  # included with your application, so that you can use the icons in
+  # the material Icons class.
+  uses-material-design: true
+
+
