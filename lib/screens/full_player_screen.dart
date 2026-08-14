@@ -106,7 +106,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
             ),
           )
               : Padding(
-            padding: const EdgeInsets.all(24.0),
+            padding: const EdgeInsets.all(6.0),
             child: Column(
               children: [
                 Expanded(
@@ -122,7 +122,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
                 Text(
                   currentItem?.title ?? '',
                   style: const TextStyle(
