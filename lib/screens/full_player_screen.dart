@@ -75,7 +75,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            const SizedBox(height: 48),
+                            const SizedBox(height: 44),
                             Column(
                               children: [
                                 Text(
