@@ -26,6 +26,9 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
   bool isVideoLooping = false;
 
   bool _isInBackground = false;
+  bool _isLifecycleTransitioning = false;
+  bool _isInternalStateChange = false;
+  bool _isResumingFromBackground = false;
 
   MediaProvider() {
     WidgetsBinding.instance.addObserver(this);
@@ -40,38 +43,24 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
   }
 
   void _initPlayerListeners() {
-    audioPlayer.sequenceStateStream.listen((sequenceState) {
-      if (sequenceState == null) return;
-      final currentItem = sequenceState.currentSource;
-      if (currentItem != null && currentItem is UriAudioSource) {
-        final tag = currentItem.tag;
-        if (tag is MediaItem) {
-          final matching = allFiles.firstWhere(
-                (f) => f.path == tag.id,
-            orElse: () => MediaItemModel(
-              path: tag.id,
-              title: tag.title,
-              folderName: tag.album ?? 'Музыка',
-              isVideo: false,
-            ),
-          );
-
-          if (currentPlaying?.path != matching.path) {
-            currentPlaying = matching;
-            currentIndex = currentPlaylist.indexWhere((item) => item.path == matching.path);
-            if (!_isInBackground && !matching.isVideo) {
-              _disposeVideoController();
-            }
-            notifyListeners();
-          }
-        }
-      }
-    });
-
     audioPlayer.playerStateStream.listen((state) {
       notifyListeners();
       if (state.processingState == ProcessingState.completed) {
         playNext();
+      }
+    });
+
+    audioPlayer.playingStream.listen((audioPlaying) {
+      if (_isInternalStateChange || _isResumingFromBackground) return;
+      if (currentPlaying != null && currentPlaying!.isVideo && !_isInBackground) {
+        final videoPlaying = videoController != null && videoController!.value.isPlaying;
+        if (audioPlaying != videoPlaying) {
+          if (audioPlaying) {
+            playAll();
+          } else {
+            pauseAll();
+          }
+        }
       }
     });
   }
@@ -79,31 +68,43 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) async {
     super.didChangeAppLifecycleState(state);
+    if (_isLifecycleTransitioning) return;
+    _isLifecycleTransitioning = true;
 
-    if (currentPlaying != null && currentPlaying!.isVideo) {
-      if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-        _isInBackground = true;
-        if (videoController != null && videoController!.value.isInitialized) {
-          final currentPos = videoController!.value.position;
-          await videoController!.setVolume(0.0);
-          await _syncBackgroundAudioSource(currentPlaying!.path, initialPosition: currentPos, playImmediately: true);
-          notifyListeners();
-        }
-      } else if (state == AppLifecycleState.resumed) {
-        _isInBackground = false;
-        final backgroundAudioPos = audioPlayer.position;
-        await audioPlayer.stop();
+    try {
+      if (currentPlaying != null && currentPlaying!.isVideo) {
+        if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+          _isInBackground = true;
+          if (videoController != null && videoController!.value.isInitialized) {
+            final currentPos = videoController!.value.position;
+            await videoController!.pause();
+            await _disposeVideoController();
+            await audioPlayer.setVolume(1.0);
+            await _syncBackgroundAudioSource(currentPlaying!.path, initialPosition: currentPos, playImmediately: true);
+            notifyListeners();
+          }
+        } else if (state == AppLifecycleState.resumed) {
+          _isResumingFromBackground = true;
+          _isInBackground = false;
+          final backgroundAudioPos = audioPlayer.position;
+          _isInternalStateChange = true;
+          await audioPlayer.pause();
+          await audioPlayer.setVolume(0.0);
+          _isInternalStateChange = false;
 
-        if (videoController != null && videoController!.value.isInitialized) {
-          await videoController!.seekTo(backgroundAudioPos);
-          await videoController!.setVolume(1.0);
-          await videoController!.play();
-          notifyListeners();
-        } else {
           await setupVideoController(currentPlaying!.path, startPosition: backgroundAudioPos);
+
+          // Stabilize resume window to prevent race conditions
+          await Future.delayed(const Duration(milliseconds: 600));
+          _isResumingFromBackground = false;
           notifyListeners();
         }
       }
+    } catch (e) {
+      debugPrint("Lifecycle transition error: $e");
+      _isResumingFromBackground = false;
+    } finally {
+      _isLifecycleTransitioning = false;
     }
   }
 
@@ -121,7 +122,6 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
   }
 
   Future<void> setupVideoController(String path, {Duration? startPosition}) async {
-    await audioPlayer.stop();
     await _disposeVideoController();
 
     isVideoInitializing = true;
@@ -134,6 +134,9 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
       }
 
       final targetPos = startPosition ?? Duration.zero;
+
+      await _syncBackgroundAudioSource(path, initialPosition: targetPos, playImmediately: false);
+      await audioPlayer.setVolume(0.0);
 
       final controller = VideoPlayerController.file(file);
       videoController = controller;
@@ -150,6 +153,7 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
 
       if (targetPos > Duration.zero && targetPos < controller.value.duration) {
         await controller.seekTo(targetPos);
+        await Future.delayed(const Duration(milliseconds: 50));
       }
 
       controller.addListener(() {
@@ -170,6 +174,9 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
       notifyListeners();
 
       await controller.play();
+      _isInternalStateChange = true;
+      await audioPlayer.play();
+      _isInternalStateChange = false;
     } catch (e) {
       debugPrint("Video initialization error: $e");
       videoController = null;
@@ -178,21 +185,22 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
     }
   }
 
-  Future<void> _syncBackgroundAudioSource(String path, {Duration? initialPosition, bool playImmediately = true}) async {
+  Future<void> _syncBackgroundAudioSource(String path, {Duration? initialPosition, bool playImmediately = false}) async {
     try {
       final item = allFiles.firstWhere((f) => f.path == path, orElse: () => currentPlaying!);
       final source = AudioSource.uri(
         Uri.file(item.path),
         tag: MediaItem(
           id: item.path,
-          album: item.folderName,
           title: item.title,
-          artist: 'Видео: ${item.folderName}',
+          album: item.folderName,
         ),
       );
       await audioPlayer.setAudioSource(source, initialPosition: initialPosition);
       if (playImmediately) {
+        _isInternalStateChange = true;
         await audioPlayer.play();
+        _isInternalStateChange = false;
       }
     } catch (e) {
       debugPrint("Sync background audio error: $e");
@@ -200,7 +208,7 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
   }
 
   Future<void> togglePlayPause() async {
-    final isPlaying = (currentPlaying != null && currentPlaying!.isVideo)
+    final isPlaying = (currentPlaying != null && currentPlaying!.isVideo && !_isInBackground)
         ? (videoController != null && videoController!.value.isPlaying)
         : audioPlayer.playing;
 
@@ -212,13 +220,16 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
   }
 
   Future<void> playAll() async {
+    _isInternalStateChange = true;
     try {
-      if (currentPlaying != null && currentPlaying!.isVideo) {
+      if (currentPlaying != null && currentPlaying!.isVideo && !_isInBackground) {
         if (videoController != null && videoController!.value.isInitialized) {
           await videoController!.setVolume(1.0);
           await videoController!.play();
+          await audioPlayer.play();
         } else {
           await setupVideoController(currentPlaying!.path);
+          _isInternalStateChange = false;
           return;
         }
       } else {
@@ -226,21 +237,27 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
       }
     } catch (e) {
       debugPrint("playAll error: $e");
+    } finally {
+      _isInternalStateChange = false;
     }
     notifyListeners();
   }
 
   Future<void> pauseAll() async {
+    _isInternalStateChange = true;
     try {
-      if (currentPlaying != null && currentPlaying!.isVideo) {
+      if (currentPlaying != null && currentPlaying!.isVideo && !_isInBackground) {
         if (videoController != null && videoController!.value.isInitialized) {
           await videoController!.pause();
+          await audioPlayer.pause();
         }
       } else {
         await audioPlayer.pause();
       }
     } catch (e) {
       debugPrint("pauseAll error: $e");
+    } finally {
+      _isInternalStateChange = false;
     }
     notifyListeners();
   }
@@ -370,26 +387,20 @@ class MediaProvider with ChangeNotifier, WidgetsBindingObserver {
     }
 
     await _disposeVideoController();
+    await audioPlayer.setVolume(1.0);
     List<AudioSource> sources = list.where((f) => !f.isVideo).map((mediaItem) {
       return AudioSource.uri(
         Uri.file(mediaItem.path),
         tag: MediaItem(
           id: mediaItem.path,
-          album: mediaItem.folderName,
           title: mediaItem.title,
-          artist: 'Папка: ${mediaItem.folderName}',
+          album: mediaItem.folderName,
         ),
       );
     }).toList();
 
     try {
-      int audioIndex = sources.indexWhere((s) {
-        if (s is UriAudioSource) {
-          final tag = s.tag;
-          if (tag is MediaItem) return tag.id == item.path;
-        }
-        return false;
-      });
+      int audioIndex = list.where((f) => !f.isVideo).toList().indexWhere((f) => f.path == item.path);
       if (audioIndex < 0) audioIndex = 0;
 
       await audioPlayer.setAudioSource(
